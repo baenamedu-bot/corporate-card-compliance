@@ -1,0 +1,93 @@
+@import "pretendard/dist/web/variable/pretendardvariable.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 25% 11%;
+
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 25% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 25% 11%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+
+    /* Deep blue / charcoal accent (금융 도메인) */
+    --primary: 222 47% 14%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 222 25% 11%;
+
+    --accent: 222 84% 32%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --ring: 222 84% 32%;
+    --radius: 0.75rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "ss01", "cv01", "cv11";
+    letter-spacing: -0.01em;
+  }
+
+  h1, h2, h3, h4 {
+    @apply tracking-tight;
+    letter-spacing: -0.02em;
+  }
+
+  /* Tabular numerals for amount columns */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Subtle focus rings */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-ring/40 ring-offset-1 ring-offset-background;
+  }
+
+  /* Premium scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 8px;
+    border: 2px solid hsl(var(--background));
+  }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.4); }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-card/80 backdrop-blur-xl border border-border/60 rounded-xl shadow-sm;
+  }
+
+  /* Risk indicators — narrow surface only */
+  .risk-bar-critical { @apply border-l-2 border-red-600; }
+  .risk-bar-high { @apply border-l-2 border-amber-500; }
+  .risk-bar-medium { @apply border-l-2 border-amber-300; }
+  .risk-bar-low { @apply border-l-2 border-transparent; }
+}
