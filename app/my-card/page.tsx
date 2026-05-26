@@ -8,6 +8,9 @@ import {
   ArrowRight,
   ShieldAlert,
   Inbox,
+  BellRing,
+  AlertOctagon,
+  CalendarClock,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Container, PageHeader } from "@/components/layout/container";
@@ -23,7 +26,7 @@ import {
   getTransactions,
   setCurrentCardLast4,
 } from "@/lib/storage";
-import { formatKRW, maskCard } from "@/lib/format";
+import { daysSince, formatKRW, maskCard, SETTLEMENT_URGENT_DAYS } from "@/lib/format";
 import { amountTier, isSettled } from "@/lib/risk-rules";
 import { TransactionItem } from "@/components/my-card/transaction-item";
 
@@ -171,9 +174,23 @@ function MyTransactions({
 
   const stats = useMemo(() => {
     const total = myTxns.reduce((s, t) => s + t.amount, 0);
-    const pending = myTxns.filter((t) => !isSettled(settledMap.get(t.id))).length;
+    const pendingTxns = myTxns.filter((t) => !isSettled(settledMap.get(t.id)));
+    const pending = pendingTxns.length;
     const tier3 = myTxns.filter((t) => amountTier(t.amount) === 3).length;
-    return { total, pending, tier3, count: myTxns.length };
+    const oldestDays = pendingTxns.length
+      ? Math.max(...pendingTxns.map((t) => daysSince(t.paidAt)))
+      : 0;
+    const urgentCount = pendingTxns.filter(
+      (t) => daysSince(t.paidAt) >= SETTLEMENT_URGENT_DAYS,
+    ).length;
+    return {
+      total,
+      pending,
+      tier3,
+      count: myTxns.length,
+      oldestDays,
+      urgentCount,
+    };
   }, [myTxns, settledMap]);
 
   const owner = myTxns[0]?.cardholderName;
@@ -210,6 +227,15 @@ function MyTransactions({
         />
       </div>
 
+      {/* 미정산 리마인더 배너 (urgent 우선, 그 다음 일반 미정산) */}
+      {myTxns.length > 0 && stats.pending > 0 && (
+        <PendingBanner
+          pendingCount={stats.pending}
+          oldestDays={stats.oldestDays}
+          urgentCount={stats.urgentCount}
+        />
+      )}
+
       {myTxns.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center gap-3 py-16 text-center">
@@ -224,12 +250,6 @@ function MyTransactions({
         </Card>
       ) : (
         <div className="space-y-3">
-          {stats.pending > 0 && (
-            <div className="mb-2 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-              <ShieldAlert className="h-3.5 w-3.5" />
-              미정산 {stats.pending}건 — 주 1회 [참석자·목적] 입력으로 정산을 마무리해주세요.
-            </div>
-          )}
           {myTxns.map((t) => (
             <TransactionItem
               key={t.id}
@@ -241,6 +261,66 @@ function MyTransactions({
         </div>
       )}
     </Container>
+  );
+}
+
+function PendingBanner({
+  pendingCount,
+  oldestDays,
+  urgentCount,
+}: {
+  pendingCount: number;
+  oldestDays: number;
+  urgentCount: number;
+}) {
+  const isUrgent = urgentCount > 0;
+  const cls = isUrgent
+    ? "border-red-300 bg-red-50"
+    : "border-amber-300 bg-amber-50";
+  const iconCls = isUrgent ? "text-red-600" : "text-amber-600";
+  const headingCls = isUrgent ? "text-red-900" : "text-amber-900";
+  const subCls = isUrgent ? "text-red-700" : "text-amber-800";
+
+  return (
+    <div
+      role="alert"
+      className={`mb-6 flex flex-col gap-3 rounded-xl border px-5 py-4 sm:flex-row sm:items-center sm:justify-between ${cls}`}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-white shadow-sm ${iconCls}`}
+        >
+          {isUrgent ? <AlertOctagon className="h-5 w-5" /> : <BellRing className="h-5 w-5" />}
+        </div>
+        <div className="space-y-1">
+          <p className={`text-sm font-semibold ${headingCls}`}>
+            미입력 <span className="tabular-nums">{pendingCount}</span>건
+            {oldestDays > 0 && (
+              <>
+                {" · "}
+                가장 오래된 건 <span className="tabular-nums">{oldestDays}일</span> 경과
+              </>
+            )}
+          </p>
+          <p className={`text-xs leading-relaxed ${subCls}`}>
+            {isUrgent ? (
+              <>
+                <strong>{SETTLEMENT_URGENT_DAYS}일 이상 경과 {urgentCount}건</strong>이
+                있습니다. 즉시 [참석자·목적]을 입력해 정산을 마무리해주세요.
+              </>
+            ) : (
+              <>주 1회 [참석자·목적] 입력으로 정산을 마무리해주세요.</>
+            )}
+          </p>
+        </div>
+      </div>
+      {isUrgent && (
+        <span className="inline-flex items-center gap-1.5 self-start rounded-md border border-red-300 bg-white px-2.5 py-1 text-xs font-semibold text-red-700 sm:self-center">
+          <CalendarClock className="h-3.5 w-3.5" />
+          긴급 {urgentCount}건
+        </span>
+      )}
+    </div>
   );
 }
 

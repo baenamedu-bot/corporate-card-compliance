@@ -39,7 +39,7 @@ import {
   tierLabel,
 } from "@/lib/risk-rules";
 import type { RiskAssessment, RiskLevel, Transaction } from "@/lib/types";
-import { formatKRW, formatDateTime, maskCard } from "@/lib/format";
+import { daysSince, formatKRW, formatDateTime, maskCard, SETTLEMENT_URGENT_DAYS } from "@/lib/format";
 import { analyzeRiskBatch } from "@/lib/ai-risk";
 import { MissingApiKeyError } from "@/lib/gemini-client";
 import {
@@ -141,22 +141,84 @@ export default function AdminPage() {
     return Array.from(m.values()).sort((a, b) => b.amount - a.amount).slice(0, 10);
   }, [txns]);
 
-  /* ---------- 미입력자 ---------- */
+  /* ---------- 미정산 — 부서별 ---------- */
+  const pendingByDept = useMemo(() => {
+    type Row = {
+      dept: string;
+      pendingCount: number;
+      pendingAmount: number;
+      oldestDays: number;
+      urgentCount: number;
+    };
+    const m = new Map<string, Row>();
+    txns.forEach((t) => {
+      if (isSettled(settledMap.get(t.id))) return;
+      const key = t.department || "미지정";
+      const days = daysSince(t.paidAt);
+      const cur = m.get(key) || {
+        dept: key,
+        pendingCount: 0,
+        pendingAmount: 0,
+        oldestDays: 0,
+        urgentCount: 0,
+      };
+      cur.pendingCount += 1;
+      cur.pendingAmount += t.amount;
+      cur.oldestDays = Math.max(cur.oldestDays, days);
+      if (days >= SETTLEMENT_URGENT_DAYS) cur.urgentCount += 1;
+      m.set(key, cur);
+    });
+    return Array.from(m.values()).sort(
+      (a, b) => b.urgentCount - a.urgentCount || b.pendingAmount - a.pendingAmount,
+    );
+  }, [txns, settledMap]);
+
+  /* ---------- 미정산 — 개인별 ---------- */
   const pendingByPerson = useMemo(() => {
-    const m = new Map<string, { name: string; last4: string; pending: number }>();
+    type Row = {
+      name: string;
+      last4: string;
+      dept: string;
+      pendingCount: number;
+      pendingAmount: number;
+      oldestDays: number;
+      urgentCount: number;
+    };
+    const m = new Map<string, Row>();
     txns.forEach((t) => {
       if (isSettled(settledMap.get(t.id))) return;
       const key = t.cardLast4;
+      const days = daysSince(t.paidAt);
       const cur = m.get(key) || {
         name: t.cardholderName || "익명",
         last4: t.cardLast4,
-        pending: 0,
+        dept: t.department || "미지정",
+        pendingCount: 0,
+        pendingAmount: 0,
+        oldestDays: 0,
+        urgentCount: 0,
       };
-      cur.pending += 1;
+      cur.pendingCount += 1;
+      cur.pendingAmount += t.amount;
+      cur.oldestDays = Math.max(cur.oldestDays, days);
+      if (days >= SETTLEMENT_URGENT_DAYS) cur.urgentCount += 1;
       m.set(key, cur);
     });
-    return Array.from(m.values()).sort((a, b) => b.pending - a.pending);
+    return Array.from(m.values()).sort(
+      (a, b) => b.urgentCount - a.urgentCount || b.pendingCount - a.pendingCount,
+    );
   }, [txns, settledMap]);
+
+  /* ---------- 미정산 — 전사 요약 ---------- */
+  const pendingSummary = useMemo(() => {
+    const totalUrgent = pendingByPerson.reduce((s, p) => s + p.urgentCount, 0);
+    const totalPending = pendingByPerson.reduce((s, p) => s + p.pendingCount, 0);
+    const oldestDays = pendingByPerson.reduce(
+      (m, p) => Math.max(m, p.oldestDays),
+      0,
+    );
+    return { totalUrgent, totalPending, oldestDays };
+  }, [pendingByPerson]);
 
   /* ---------- 위험 분포 ---------- */
   const riskDist = useMemo(() => {
@@ -307,7 +369,18 @@ export default function AdminPage() {
           label="미정산"
           value={`${stats.pending}건`}
           icon={Users}
-          tone={stats.pending > 0 ? "amber" : undefined}
+          tone={
+            pendingSummary.totalUrgent > 0
+              ? "red"
+              : stats.pending > 0
+                ? "amber"
+                : undefined
+          }
+          sub={
+            pendingSummary.totalUrgent > 0
+              ? `긴급 ${pendingSummary.totalUrgent}건 · 최장 ${pendingSummary.oldestDays}일`
+              : undefined
+          }
         />
         <Kpi
           label="경고"
@@ -482,43 +555,129 @@ export default function AdminPage() {
         </TabsContent>
 
         <TabsContent value="pending">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm">미정산자 현황</CardTitle>
-              <CardDescription>참석자·목적 미입력 건수 기준</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {pendingByPerson.length === 0 ? (
+          {pendingByPerson.length === 0 ? (
+            <Card>
+              <CardContent>
                 <EmptyState
                   icon={ClipboardList}
                   title="모든 결제가 정산되었습니다"
                   desc="참석자·목적이 모두 입력되어 있습니다."
                 />
-              ) : (
-                <div className="divide-y divide-border/60">
-                  {pendingByPerson.map((p) => (
-                    <div
-                      key={p.last4}
-                      className="flex items-center justify-between gap-3 py-3 text-sm"
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-amber-50 text-amber-700">
-                          <Users className="h-4 w-4" />
-                        </span>
-                        <div>
-                          <p className="font-medium">{p.name}</p>
-                          <p className="text-xs text-muted-foreground font-mono">
-                            {maskCard(p.last4)}
-                          </p>
-                        </div>
-                      </div>
-                      <Badge variant="amber">미정산 {p.pending}건</Badge>
-                    </div>
-                  ))}
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-4">
+              {/* 전사 요약 라인 */}
+              <div
+                className={
+                  "flex flex-col gap-2 rounded-xl border px-5 py-4 sm:flex-row sm:items-center sm:justify-between " +
+                  (pendingSummary.totalUrgent > 0
+                    ? "border-red-300 bg-red-50"
+                    : "border-amber-300 bg-amber-50")
+                }
+              >
+                <div className="text-sm">
+                  <p
+                    className={
+                      "font-semibold " +
+                      (pendingSummary.totalUrgent > 0 ? "text-red-900" : "text-amber-900")
+                    }
+                  >
+                    전사 미정산{" "}
+                    <span className="tabular-nums">{pendingSummary.totalPending}</span>건
+                    {pendingSummary.oldestDays > 0 && (
+                      <>
+                        {" · "}최장 경과{" "}
+                        <span className="tabular-nums">{pendingSummary.oldestDays}일</span>
+                      </>
+                    )}
+                  </p>
+                  <p
+                    className={
+                      "mt-0.5 text-xs " +
+                      (pendingSummary.totalUrgent > 0 ? "text-red-700" : "text-amber-800")
+                    }
+                  >
+                    {pendingSummary.totalUrgent > 0
+                      ? `${SETTLEMENT_URGENT_DAYS}일 이상 경과 ${pendingSummary.totalUrgent}건 — 컴플라이언스 지연 위험`
+                      : "주 1회 정산 리듬을 유지하고 있습니다."}
+                  </p>
                 </div>
-              )}
-            </CardContent>
-          </Card>
+                {pendingSummary.totalUrgent > 0 && (
+                  <Badge variant="red">긴급 {pendingSummary.totalUrgent}건</Badge>
+                )}
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-2">
+                {/* 부서별 미정산 표 */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">부서별 미정산</CardTitle>
+                    <CardDescription>
+                      긴급(7일+) · 미정산 합계 금액 내림차순
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="px-0">
+                    <PendingTable
+                      head={["부서", "건", "금액", "최장경과"]}
+                      rows={pendingByDept.map((p) => ({
+                        key: p.dept,
+                        cells: [
+                          <span className="font-medium" key="c1">
+                            {p.dept}
+                          </span>,
+                          <span className="tabular-nums" key="c2">
+                            {p.pendingCount}건
+                          </span>,
+                          <span className="tabular-nums" key="c3">
+                            {formatKRW(p.pendingAmount)}
+                          </span>,
+                          <OldestDaysChip key="c4" days={p.oldestDays} />,
+                        ],
+                        urgent: p.urgentCount > 0,
+                        urgentBadge: p.urgentCount > 0 ? `긴급 ${p.urgentCount}` : undefined,
+                      }))}
+                    />
+                  </CardContent>
+                </Card>
+
+                {/* 개인별 미정산 표 */}
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">개인별 미정산</CardTitle>
+                    <CardDescription>
+                      카드 끝 4자리 기준 · 긴급(7일+) · 미정산 건수 내림차순
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="px-0">
+                    <PendingTable
+                      head={["사용자", "건", "금액", "최장경과"]}
+                      rows={pendingByPerson.map((p) => ({
+                        key: p.last4,
+                        cells: [
+                          <div key="c1">
+                            <p className="font-medium">{p.name}</p>
+                            <p className="text-[11px] text-muted-foreground">
+                              <span className="font-mono">{maskCard(p.last4)}</span> · {p.dept}
+                            </p>
+                          </div>,
+                          <span className="tabular-nums" key="c2">
+                            {p.pendingCount}건
+                          </span>,
+                          <span className="tabular-nums" key="c3">
+                            {formatKRW(p.pendingAmount)}
+                          </span>,
+                          <OldestDaysChip key="c4" days={p.oldestDays} />,
+                        ],
+                        urgent: p.urgentCount > 0,
+                        urgentBadge: p.urgentCount > 0 ? `긴급 ${p.urgentCount}` : undefined,
+                      }))}
+                    />
+                  </CardContent>
+                </Card>
+              </div>
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="rank">
@@ -574,11 +733,13 @@ function Kpi({
   value,
   icon: Icon,
   tone,
+  sub,
 }: {
   label: string;
   value: string;
   icon: React.ComponentType<{ className?: string }>;
   tone?: "amber" | "red";
+  sub?: string;
 }) {
   return (
     <Card>
@@ -606,6 +767,16 @@ function Kpi({
         >
           {value}
         </p>
+        {sub && (
+          <p
+            className={
+              "mt-0.5 text-[11px] " +
+              (tone === "red" ? "text-red-700" : "text-muted-foreground")
+            }
+          >
+            {sub}
+          </p>
+        )}
       </CardContent>
     </Card>
   );
@@ -695,6 +866,81 @@ function EmptyChart() {
   return (
     <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
       데이터가 없습니다
+    </div>
+  );
+}
+
+function OldestDaysChip({ days }: { days: number }) {
+  if (days <= 0) return <span className="text-muted-foreground">-</span>;
+  const urgent = days >= SETTLEMENT_URGENT_DAYS;
+  return (
+    <span
+      className={
+        "inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-medium tabular-nums " +
+        (urgent
+          ? "border-red-300 bg-red-50 text-red-700"
+          : "border-amber-200 bg-amber-50 text-amber-700")
+      }
+    >
+      {days}일
+    </span>
+  );
+}
+
+interface PendingRow {
+  key: string;
+  cells: React.ReactNode[];
+  urgent: boolean;
+  urgentBadge?: string;
+}
+
+function PendingTable({ head, rows }: { head: string[]; rows: PendingRow[] }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b border-border/60 text-[11px] uppercase tracking-wider text-muted-foreground">
+            {head.map((h, i) => (
+              <th
+                key={h}
+                className={
+                  "px-4 py-2 font-medium " + (i === 0 ? "text-left" : "text-right")
+                }
+              >
+                {h}
+              </th>
+            ))}
+            <th className="px-4 py-2"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr
+              key={r.key}
+              className={
+                "border-b border-border/40 last:border-0 " +
+                (r.urgent ? "bg-red-50/40" : "")
+              }
+            >
+              {r.cells.map((c, i) => (
+                <td
+                  key={i}
+                  className={"px-4 py-2.5 " + (i === 0 ? "text-left" : "text-right")}
+                >
+                  {c}
+                </td>
+              ))}
+              <td className="px-4 py-2.5 text-right">
+                {r.urgentBadge && (
+                  <span className="inline-flex items-center rounded-md border border-red-300 bg-red-50 px-1.5 py-0.5 text-[11px] font-semibold text-red-700">
+                    {r.urgentBadge}
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

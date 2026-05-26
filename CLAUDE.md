@@ -80,6 +80,14 @@ lib/
 1. **컬럼 매핑**: 카드사 헤더 + 샘플 3행 → 표준 컬럼명으로 매핑한 JSON 반환
 2. **위험 분류**: 가맹점명·업종·시간 → `{ level, reasons[] }` JSON 반환 (유흥/심야/주말 등)
 
+## 미정산 리마인더 (외부 발송 X, 화면 내 표시만)
+- 경과일 기준: `daysSince(paidAt)` — `SETTLEMENT_URGENT_DAYS = 7` 이상이면 urgent
+- **본인 내역 (my-card)**: 상단 `<PendingBanner />` — urgent 있으면 red, 없으면 amber. "미입력 N건 · 가장 오래된 건 N일 경과" + urgent N건 강조
+- **본인 결제 카드** (`transaction-item`): urgent 미정산은 카드 좌측 빨간 라인 + "긴급 · N일 경과" 빨간 배지. 비-urgent 미정산은 회색 "N일 경과" 배지
+- **관리자 (admin) 미정산 탭**: 전사 요약 배너 + 부서별 표 + 개인별 표 (건수·금액·최장경과일 컬럼). urgent 있는 행은 빨간 배경 + "긴급 N" 배지
+- **관리자 KPI 미정산 카드**: urgent 있으면 red 톤 + "긴급 N건 · 최장 N일" 보조 텍스트
+- 알림 채널: 화면 내 배너·배지·표만. 메일·푸시 등 외부 발송 없음
+
 ## PDF 출력 (보고서)
 `lib/pdf-export.ts` — html2canvas + jsPDF 로 보고서 화면을 A4 세로 PDF 로 저장.
 - 한글 처리: 캡쳐 시 텍스트가 픽셀로 래스터화 → 폰트 임베딩 자체 불필요. `document.fonts.ready` 대기 + `onclone` 에서 Pretendard 강제 적용으로 깨짐 방지

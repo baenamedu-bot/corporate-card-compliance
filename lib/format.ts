@@ -53,6 +53,18 @@ export function isLateNight(iso: string): boolean {
   return h >= 22 || h < 5;
 }
 
+/** 주어진 ISO 일시로부터 오늘까지의 경과 일수 (음수면 미래) */
+export function daysSince(iso: string): number {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return 0;
+  const now = new Date();
+  const diff = now.getTime() - d.getTime();
+  return Math.floor(diff / (24 * 60 * 60 * 1000));
+}
+
+/** 미정산 긴급도 임계값 (일) */
+export const SETTLEMENT_URGENT_DAYS = 7;
+
 export function weekRange(date: Date = new Date()): { start: Date; end: Date } {
   const d = new Date(date);
   const day = d.getDay();

@@ -20,7 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { Settlement, Transaction } from "@/lib/types";
-import { formatDateTime, formatKRW } from "@/lib/format";
+import { daysSince, formatDateTime, formatKRW, SETTLEMENT_URGENT_DAYS } from "@/lib/format";
 import {
   amountTier,
   isSettled,
@@ -45,6 +45,8 @@ export function TransactionItem({
   const tier = amountTier(txn.amount);
   const settled = isSettled(settlement);
   const risk = ruleBasedRisk(txn);
+  const pendingDays = !settled ? daysSince(txn.paidAt) : 0;
+  const isUrgentPending = !settled && pendingDays >= SETTLEMENT_URGENT_DAYS;
 
   const [open, setOpen] = useState(!settled && tier >= 1);
   const [attendees, setAttendees] = useState(settlement?.attendees ?? "");
@@ -89,7 +91,13 @@ export function TransactionItem({
   };
 
   return (
-    <Card className={cn("overflow-hidden", riskBarClass(risk.level))}>
+    <Card
+      className={cn(
+        "overflow-hidden",
+        // urgent 미정산은 위험 좌측 라인보다 우선 (빨강으로 강조)
+        isUrgentPending ? "risk-bar-critical" : riskBarClass(risk.level),
+      )}
+    >
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
@@ -111,7 +119,7 @@ export function TransactionItem({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <p className="truncate font-medium">{txn.merchantName}</p>
               {tier === 3 && (
                 <Badge variant="red" className="shrink-0">
@@ -128,6 +136,16 @@ export function TransactionItem({
                   사후 보고
                 </Badge>
               )}
+              {!settled && pendingDays > 0 &&
+                (isUrgentPending ? (
+                  <Badge variant="red" className="shrink-0">
+                    긴급 · {pendingDays}일 경과
+                  </Badge>
+                ) : (
+                  <Badge variant="muted" className="shrink-0">
+                    {pendingDays}일 경과
+                  </Badge>
+                ))}
             </div>
             <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
               <Clock className="h-3 w-3" />
