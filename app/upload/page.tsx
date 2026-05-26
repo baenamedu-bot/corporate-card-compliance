@@ -11,6 +11,8 @@ import {
   X,
   Database,
   Trash2,
+  Zap,
+  RotateCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Container, PageHeader } from "@/components/layout/container";
@@ -34,6 +36,12 @@ import {
 } from "@/lib/excel-utils";
 import { mapColumnsWithAI } from "@/lib/ai-mapping";
 import { MissingApiKeyError } from "@/lib/gemini-client";
+import {
+  applyPreset,
+  detectCardCompany,
+  normalizeDetectedCompany,
+  type DetectionResult,
+} from "@/lib/card-presets";
 import {
   addBatch,
   addTransactions,
@@ -68,11 +76,15 @@ const STANDARD_FIELDS: Array<{ key: keyof ColumnMapping; label: string; required
   { key: "department", label: "부서", required: false },
 ];
 
+type MappingSource = "preset" | "ai" | "manual" | null;
+
 export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [sheet, setSheet] = useState<ParsedSheet | null>(null);
   const [cardCompany, setCardCompany] = useState<CardCompany>("신한");
   const [mapping, setMapping] = useState<ColumnMapping | null>(null);
+  const [mappingSource, setMappingSource] = useState<MappingSource>(null);
+  const [detection, setDetection] = useState<DetectionResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -83,14 +95,48 @@ export default function UploadPage() {
   const onFile = useCallback(async (f: File) => {
     setFile(f);
     setMapping(null);
+    setMappingSource(null);
+    setDetection(null);
     try {
       const wb = await readWorkbook(f);
       const parsed = extractSheet(wb);
       setSheet(parsed);
       if (!parsed.headers.length) {
         toast.error("엑셀 헤더를 인식할 수 없습니다.");
+        return;
+      }
+
+      // 1) 카드사 자동 감지 (파일명 → 시트명 → 헤더)
+      const det = detectCardCompany({
+        fileName: f.name,
+        sheetName: parsed.sheetName,
+        headers: parsed.headers,
+      });
+
+      if (det) {
+        setDetection(det);
+        const normalized = normalizeDetectedCompany(det.company);
+        setCardCompany(normalized);
+
+        // 2) 프리셋 즉시 매핑 시도 (AI 호출 0)
+        const preset = applyPreset(det.company, parsed.headers);
+        if (preset) {
+          setMapping(preset);
+          setMappingSource("preset");
+          toast.success(
+            `${det.company}카드 프리셋으로 즉시 매핑됨 — AI 호출 없이 표준화 준비 완료`,
+          );
+          return;
+        }
+
+        // 감지는 됐는데 프리셋 매칭 실패 → AI 폴백 안내
+        toast.message(
+          `${det.company}카드 양식으로 감지됐지만 필수 컬럼이 다릅니다. AI 매핑이 필요합니다.`,
+        );
       } else {
-        toast.success(`엑셀을 읽었습니다. ${parsed.rows.length}개 행 감지`);
+        toast.message(
+          `${parsed.rows.length}개 행을 읽었습니다. 카드사 자동 감지 실패 — AI 매핑을 사용해주세요.`,
+        );
       }
     } catch (e) {
       toast.error("엑셀 파일을 읽을 수 없습니다.");
@@ -107,7 +153,8 @@ export default function UploadPage() {
         sampleRows: sheet.sampleRows,
       });
       setMapping(m);
-      toast.success(`컬럼 매핑 완료 (신뢰도 ${Math.round(m.confidence * 100)}%)`);
+      setMappingSource("ai");
+      toast.success(`AI 매핑 완료 (신뢰도 ${Math.round(m.confidence * 100)}%)`);
     } catch (e) {
       if (e instanceof MissingApiKeyError) {
         toast.message("Gemini API 키가 필요합니다. 우측 상단 ⚙️ 버튼에서 설정해주세요.");
@@ -118,6 +165,23 @@ export default function UploadPage() {
       setAnalyzing(false);
     }
   }, [sheet]);
+
+  /** 사용자가 카드사를 수동으로 바꾸면 프리셋 재시도 */
+  const onChangeCardCompany = useCallback(
+    (c: CardCompany) => {
+      setCardCompany(c);
+      if (!sheet) return;
+      // 이미 AI/수동 매핑이 있는 상태에서 카드사만 바꾸면 자동 덮어쓰지 않음
+      if (mappingSource === "ai" || mappingSource === "manual") return;
+      const preset = applyPreset(c, sheet.headers);
+      if (preset) {
+        setMapping(preset);
+        setMappingSource("preset");
+        toast.success(`${c}카드 프리셋으로 매핑됨 (AI 호출 없음)`);
+      }
+    },
+    [sheet, mappingSource],
+  );
 
   const updateMapping = (key: keyof ColumnMapping, value: string) => {
     setMapping((prev) => {
@@ -131,6 +195,7 @@ export default function UploadPage() {
         };
       return { ...base, [key]: value || undefined };
     });
+    setMappingSource((s) => (s === "preset" || s === "ai" ? "manual" : s));
   };
 
   const requiredOk =
@@ -183,6 +248,8 @@ export default function UploadPage() {
       setFile(null);
       setSheet(null);
       setMapping(null);
+      setMappingSource(null);
+      setDetection(null);
       setRefreshKey((k) => k + 1);
     } catch (e) {
       toast.error("저장 실패: " + (e instanceof Error ? e.message : "알 수 없는 오류"));
@@ -221,39 +288,33 @@ export default function UploadPage() {
           {/* 카드사 + 파일 선택 */}
           <Card>
             <CardHeader>
-              <CardTitle>1. 카드사 선택 및 파일 업로드</CardTitle>
+              <CardTitle>1. 파일 업로드 (카드사 자동 감지)</CardTitle>
               <CardDescription>
-                카드사를 먼저 선택하고 청구 내역 엑셀(.xlsx, .xls)을 선택하세요.
+                청구 엑셀(.xlsx, .xls)을 올리면 파일명·시트명·헤더로 카드사를 자동 감지하고
+                프리셋 매칭 시 AI 호출 없이 즉시 표준화합니다.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-5">
-              <div className="grid gap-2">
-                <Label>카드사</Label>
-                <Select
-                  value={cardCompany}
-                  onValueChange={(v) => setCardCompany(v as CardCompany)}
-                >
-                  <SelectTrigger className="max-w-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {CARD_COMPANIES.map((c) => (
-                      <SelectItem key={c} value={c}>
-                        {c}카드
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <DropZone file={file} onFile={onFile} onClear={() => { setFile(null); setSheet(null); setMapping(null); }} />
+              <DropZone
+                file={file}
+                onFile={onFile}
+                onClear={() => {
+                  setFile(null);
+                  setSheet(null);
+                  setMapping(null);
+                  setMappingSource(null);
+                  setDetection(null);
+                }}
+              />
 
               {sheet && (
                 <div className="rounded-lg border border-border/60 bg-muted/30 p-4 text-sm">
                   <div className="flex items-center gap-2 text-foreground/90">
                     <FileSpreadsheet className="h-4 w-4 text-accent" />
-                    헤더 <strong className="tabular-nums">{sheet.headers.length}</strong>개 · 데이터{" "}
-                    <strong className="tabular-nums">{sheet.rows.length}</strong>행 감지됨
+                    시트{" "}
+                    <strong className="font-mono">{sheet.sheetName}</strong> · 헤더{" "}
+                    <strong className="tabular-nums">{sheet.headers.length}</strong>개 · 데이터{" "}
+                    <strong className="tabular-nums">{sheet.rows.length}</strong>행
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1">
                     {sheet.headers.slice(0, 12).map((h) => (
@@ -267,34 +328,108 @@ export default function UploadPage() {
                   </div>
                 </div>
               )}
+
+              {/* 카드사 (자동 감지 + 수동 변경) */}
+              <div className="grid gap-2">
+                <Label className="flex items-center gap-2">
+                  카드사
+                  {detection && (
+                    <Badge variant="accent" className="text-[10px]">
+                      <Zap className="h-2.5 w-2.5" />
+                      {sourceLabel(detection.source)}으로 자동 감지
+                    </Badge>
+                  )}
+                </Label>
+                <Select
+                  value={cardCompany}
+                  onValueChange={(v) => onChangeCardCompany(v as CardCompany)}
+                >
+                  <SelectTrigger className="max-w-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CARD_COMPANIES.map((c) => (
+                      <SelectItem key={c} value={c}>
+                        {c}카드
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  자동 감지 결과가 틀리면 카드사를 직접 선택하세요. 프리셋이 자동으로 재시도됩니다.
+                </p>
+              </div>
             </CardContent>
           </Card>
 
-          {/* AI 매핑 */}
+          {/* 매핑 영역 */}
           {sheet && (
             <Card>
               <CardHeader>
-                <CardTitle>2. AI 컬럼 자동 매핑</CardTitle>
-                <CardDescription>
-                  Gemini가 헤더와 샘플 데이터를 분석해 표준 컬럼으로 매핑합니다. 결과를 확인 후
-                  수정할 수 있습니다.
-                </CardDescription>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <CardTitle>2. 컬럼 매핑</CardTitle>
+                    <CardDescription>
+                      {mappingSource === "preset"
+                        ? "카드사 프리셋으로 즉시 매핑되었습니다. AI 호출 없이 저장 가능합니다."
+                        : mappingSource === "ai"
+                          ? "AI가 헤더와 샘플 데이터를 분석해 매핑했습니다. 결과를 확인하고 저장하세요."
+                          : "프리셋 매칭이 실패했거나 비표준 양식입니다. AI 매핑을 실행하세요."}
+                    </CardDescription>
+                  </div>
+                  {mappingSource === "preset" && (
+                    <Badge variant="emerald" className="shrink-0">
+                      <Zap className="h-2.5 w-2.5" />
+                      프리셋 즉시 매핑 · 토큰 0
+                    </Badge>
+                  )}
+                  {mappingSource === "ai" && (
+                    <Badge variant="accent" className="shrink-0">
+                      <Sparkles className="h-2.5 w-2.5" />
+                      AI 매핑
+                    </Badge>
+                  )}
+                  {mappingSource === "manual" && (
+                    <Badge variant="muted" className="shrink-0">수동 수정됨</Badge>
+                  )}
+                </div>
               </CardHeader>
               <CardContent className="space-y-4">
-                <Button onClick={runAi} disabled={analyzing} variant="accent">
-                  {analyzing ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Sparkles className="h-4 w-4" />
+                <div className="flex flex-wrap items-center gap-2">
+                  {!mapping && (
+                    <Button onClick={runAi} disabled={analyzing} variant="accent">
+                      {analyzing ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-4 w-4" />
+                      )}
+                      {analyzing ? "AI 분석 중..." : "AI로 컬럼 매핑하기"}
+                    </Button>
                   )}
-                  {analyzing ? "AI 분석 중..." : "AI로 컬럼 매핑하기"}
-                </Button>
+                  {mapping && mappingSource !== "ai" && (
+                    <Button
+                      onClick={runAi}
+                      disabled={analyzing}
+                      variant="outline"
+                      size="sm"
+                    >
+                      {analyzing ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RotateCw className="h-4 w-4" />
+                      )}
+                      {analyzing ? "AI 분석 중..." : "AI로 다시 매핑"}
+                    </Button>
+                  )}
+                </div>
 
                 {mapping && (
                   <>
                     <div className="rounded-lg border border-border/60 bg-muted/20 p-3 text-xs">
                       <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground">매핑 신뢰도</span>
+                        <span className="text-muted-foreground">
+                          {mappingSource === "preset" ? "프리셋 매칭 신뢰도" : "매핑 신뢰도"}
+                        </span>
                         <span className="font-semibold tabular-nums">
                           {Math.round((mapping.confidence ?? 0) * 100)}%
                         </span>
@@ -371,8 +506,33 @@ export default function UploadPage() {
           )}
         </div>
 
-        {/* 우측: 업로드 이력 */}
+        {/* 우측: 사이드바 */}
         <div className="space-y-6">
+          <Card className="border-accent/30 bg-accent/5">
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm">지원 프리셋</CardTitle>
+                <Zap className="h-4 w-4 text-accent" />
+              </div>
+              <CardDescription>
+                아래 카드사는 AI 호출 없이 즉시 매핑됩니다
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-wrap gap-1.5">
+                {["신한", "삼성", "국민", "현대", "롯데", "BC", "하나", "우리"].map((c) => (
+                  <Badge key={c} variant="outline" className="border-accent/30 bg-background">
+                    {c}카드
+                  </Badge>
+                ))}
+              </div>
+              <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
+                프리셋 매칭 시 Gemini 토큰 비용 0. 비표준 양식이거나 컬럼명이 변형된 경우
+                AI 폴백이 자동 안내됩니다.
+              </p>
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between">
@@ -421,6 +581,10 @@ export default function UploadPage() {
       </div>
     </Container>
   );
+}
+
+function sourceLabel(source: DetectionResult["source"]): string {
+  return source === "filename" ? "파일명" : source === "sheet" ? "시트명" : "헤더";
 }
 
 function DropZone({

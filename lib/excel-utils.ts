@@ -12,6 +12,7 @@ import { riskLevelLabel, tierLabel } from "./risk-rules";
 /* ---------- 파싱 ---------- */
 
 export interface ParsedSheet {
+  sheetName: string;
   headers: string[];
   rows: Record<string, unknown>[];
   sampleRows: Record<string, unknown>[]; // 첫 3행
@@ -35,7 +36,7 @@ export function extractSheet(wb: XLSX.WorkBook, sheetName?: string): ParsedSheet
     raw: false,
   }) as unknown as unknown[][];
 
-  if (!raw.length) return { headers: [], rows: [], sampleRows: [] };
+  if (!raw.length) return { sheetName: name, headers: [], rows: [], sampleRows: [] };
 
   let headerIdx = 0;
   let bestCount = 0;
@@ -65,6 +66,7 @@ export function extractSheet(wb: XLSX.WorkBook, sheetName?: string): ParsedSheet
   }
 
   return {
+    sheetName: name,
     headers,
     rows: dataRows,
     sampleRows: dataRows.slice(0, 3),

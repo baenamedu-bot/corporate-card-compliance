@@ -80,6 +80,14 @@ lib/
 1. **컬럼 매핑**: 카드사 헤더 + 샘플 3행 → 표준 컬럼명으로 매핑한 JSON 반환
 2. **위험 분류**: 가맹점명·업종·시간 → `{ level, reasons[] }` JSON 반환 (유흥/심야/주말 등)
 
+## 카드사 프리셋 (토큰 절감)
+`lib/card-presets.ts` — 신한·삼성·국민·현대·롯데·BC·하나·우리 8개 카드사 컬럼 매핑 프리셋.
+- `detectCardCompany({fileName, sheetName, headers})`: 파일명 → 시트명 → 헤더 키워드 순으로 카드사 추정 (점수제)
+- `applyPreset(company, headers)`: 후보 컬럼명으로 표준 매핑 생성. 필수 4개 필드 모두 매핑되어야 성공, 실패 시 null
+- **업로드 흐름**: 파일 업로드 → detect → applyPreset 시도 → 성공 시 mapping 자동 설정(`mappingSource="preset"`) → AI 호출 0회
+- **AI 폴백**: 프리셋 매칭 실패 시에만 `runAi()` 호출 가능. 사용자는 "AI로 다시 매핑"으로 강제 호출도 가능
+- 사용자가 카드사를 수동 변경하면 프리셋 재시도 (단, AI/수동 매핑이 이미 있으면 덮어쓰지 않음)
+
 ## 디자인 토큰
 - 베이스 zinc / 액센트 deep blue (slate-900, blue-700). violet/보라 금지
 - 카드 rounded-xl, 버튼 h-11, CTA h-12, shadow-sm
