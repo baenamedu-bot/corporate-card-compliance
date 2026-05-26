@@ -24,11 +24,13 @@ import {
   TabsContent,
 } from "@/components/ui/tabs";
 import {
-  getRisks,
-  getSettlements,
-  getTransactions,
-  saveRisks,
-} from "@/lib/storage";
+  listFlags,
+  listSettlements,
+  listTransactions,
+  upsertFlag,
+  upsertFlagsBulk,
+} from "@/lib/db/transactions";
+import { dbFlagToRisk, dbSettlementToClient, dbTxnToClient } from "@/lib/db/adapters";
 import {
   amountTier,
   isSettled,
@@ -38,7 +40,7 @@ import {
   ruleBasedRisk,
   tierLabel,
 } from "@/lib/risk-rules";
-import type { RiskAssessment, RiskLevel, Transaction } from "@/lib/types";
+import type { RiskAssessment, RiskLevel, Settlement, Transaction } from "@/lib/types";
 import { daysSince, formatKRW, formatDateTime, maskCard, SETTLEMENT_URGENT_DAYS } from "@/lib/format";
 import { analyzeRiskBatch } from "@/lib/ai-risk";
 import { MissingApiKeyError } from "@/lib/gemini-client";
@@ -65,32 +67,77 @@ const RISK_COLOR: Record<RiskLevel, string> = {
 export default function AdminPage() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [activeTier, setActiveTier] = useState<"all" | 1 | 2 | 3>("all");
 
-  const txns = useMemo(() => getTransactions(), [refreshKey]);
-  const settlements = useMemo(() => getSettlements(), [refreshKey]);
+  const [txns, setTxns] = useState<Transaction[]>([]);
+  const [settlements, setSettlements] = useState<Settlement[]>([]);
+  const [risks, setRisks] = useState<RiskAssessment[]>([]);
+
+  // Supabase 로드 + 누락된 플래그 자동 생성
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const dbTxns = await listTransactions({ limit: 1000 });
+        const clientTxns = dbTxns.map((t) => dbTxnToClient(t));
+        if (cancelled) return;
+        setTxns(clientTxns);
+        const ids = clientTxns.map((t) => t.id);
+        const [dbSettles, dbFlags] = await Promise.all([
+          listSettlements(ids),
+          listFlags(ids),
+        ]);
+        if (cancelled) return;
+        setSettlements(dbSettles.map(dbSettlementToClient));
+        const flagMap = new Map(dbFlags.map((f) => [f.transaction_id, f]));
+        const risksLoaded: RiskAssessment[] = clientTxns.map((t) => {
+          const f = flagMap.get(t.id);
+          return f ? dbFlagToRisk(f, amountTier(t.amount)) : ruleBasedRisk(t);
+        });
+        setRisks(risksLoaded);
+
+        // DB 에 누락된 플래그가 있으면 일괄 upsert (자동 채움)
+        const missing = clientTxns.filter((t) => !flagMap.has(t.id));
+        if (missing.length) {
+          await upsertFlagsBulk(
+            missing.map((t) => {
+              const r = ruleBasedRisk(t);
+              return {
+                transaction_id: t.id,
+                severity: r.level,
+                rule_type: r.classification?.verdict ?? "clear",
+                category: r.classification?.category ?? null,
+                matched_code: r.classification?.matchedCode ?? null,
+                matched_keyword: r.classification?.matchedKeyword ?? null,
+                reasons: r.reasons,
+                ai_analyzed: false,
+                needs_ai: !!r.needsAI,
+              };
+            }),
+          );
+        }
+      } catch (e) {
+        toast.error("로딩 실패: " + (e instanceof Error ? e.message : String(e)));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
   const settledMap = useMemo(
     () => new Map(settlements.map((s) => [s.transactionId, s])),
     [settlements],
   );
-  const risks = useMemo(() => getRisks(), [refreshKey]);
   const riskMap = useMemo(
     () => new Map(risks.map((r) => [r.transactionId, r])),
     [risks],
   );
-
-  // 누락된 위험 평가 자동 채움 (룰 베이스)
-  useEffect(() => {
-    if (!txns.length) return;
-    const existing = new Set(risks.map((r) => r.transactionId));
-    const missing = txns.filter((t) => !existing.has(t.id));
-    if (missing.length) {
-      const next = [...risks, ...missing.map((t) => ruleBasedRisk(t))];
-      saveRisks(next);
-      setRefreshKey((k) => k + 1);
-    }
-  }, [txns, risks]);
 
   /* ---------- 통계 ---------- */
   const stats = useMemo(() => {
@@ -283,12 +330,12 @@ export default function AdminPage() {
     }
     setAnalyzing(true);
     try {
-      const next: RiskAssessment[] = [...risks];
       const chunk = 25;
       for (let i = 0; i < aiTargets.length; i += chunk) {
         const slice = aiTargets.slice(i, i + chunk);
         const ai = await analyzeRiskBatch(slice);
-        slice.forEach((t) => {
+        // 각 결제별 upsert (DB와 동기화)
+        for (const t of slice) {
           const aiItem = ai.find((a) => a.id === t.id);
           const baseRule = ruleBasedRisk(t);
           const reasons = aiItem
@@ -298,19 +345,18 @@ export default function AdminPage() {
             aiItem && severity(aiItem.level) > severity(baseRule.level)
               ? aiItem.level
               : baseRule.level;
-          const idx = next.findIndex((r) => r.transactionId === t.id);
-          const merged: RiskAssessment = {
-            ...baseRule,
-            level,
+          await upsertFlag({
+            transaction_id: t.id,
+            severity: level,
+            rule_type: baseRule.classification?.verdict ?? "clear",
+            category: baseRule.classification?.category ?? null,
+            matched_code: baseRule.classification?.matchedCode ?? null,
+            matched_keyword: baseRule.classification?.matchedKeyword ?? null,
             reasons,
-            assessedAt: new Date().toISOString(),
-            aiAnalyzed: true,
-            needsAI: false,
-          };
-          if (idx >= 0) next[idx] = merged;
-          else next.push(merged);
-        });
-        saveRisks(next);
+            ai_analyzed: true,
+            needs_ai: false,
+          });
+        }
         setRefreshKey((k) => k + 1);
       }
       toast.success(`모호 케이스 ${aiTargets.length}건의 AI 보강 분석이 완료되었습니다.`);

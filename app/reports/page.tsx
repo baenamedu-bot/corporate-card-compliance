@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Download, Calendar, ShieldAlert, Users, AlertCircle, FileText, Loader2 } from "lucide-react";
 import { Container, PageHeader } from "@/components/layout/container";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -12,11 +12,10 @@ import {
   TabsTrigger,
   TabsContent,
 } from "@/components/ui/tabs";
-import {
-  getRisks,
-  getSettlements,
-  getTransactions,
-} from "@/lib/storage";
+import { listFlags, listSettlements, listTransactions } from "@/lib/db/transactions";
+import { dbFlagToRisk, dbSettlementToClient, dbTxnToClient } from "@/lib/db/adapters";
+import { amountTier } from "@/lib/risk-rules";
+import type { RiskAssessment, Settlement, Transaction } from "@/lib/types";
 import { formatKRW, formatDate, maskCard, monthRange, weekRange } from "@/lib/format";
 import { exportTransactionsXlsx } from "@/lib/excel-utils";
 import { buildReportFileName, exportElementToPDF } from "@/lib/pdf-export";
@@ -41,9 +40,47 @@ export default function ReportsPage() {
 
   const range = useMemo(() => (period === "week" ? weekRange() : monthRange()), [period]);
 
-  const txns = useMemo(() => getTransactions(), []);
-  const settlements = useMemo(() => getSettlements(), []);
-  const risks = useMemo(() => getRisks(), []);
+  const [txns, setTxns] = useState<Transaction[]>([]);
+  const [settlements, setSettlements] = useState<Settlement[]>([]);
+  const [risks, setRisks] = useState<RiskAssessment[]>([]);
+  const [loadingData, setLoadingData] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoadingData(true);
+      try {
+        const dbTxns = await listTransactions({ limit: 2000 });
+        if (cancelled) return;
+        const clientTxns = dbTxns.map((t) => dbTxnToClient(t));
+        setTxns(clientTxns);
+        const ids = clientTxns.map((t) => t.id);
+        const [s, f] = await Promise.all([listSettlements(ids), listFlags(ids)]);
+        if (cancelled) return;
+        setSettlements(s.map(dbSettlementToClient));
+        const fmap = new Map(f.map((x) => [x.transaction_id, x]));
+        setRisks(
+          clientTxns.map((t) => {
+            const fx = fmap.get(t.id);
+            return fx ? dbFlagToRisk(fx, amountTier(t.amount)) : ({
+              transactionId: t.id,
+              level: "low",
+              reasons: [],
+              amountTier: amountTier(t.amount),
+              assessedAt: new Date().toISOString(),
+              aiAnalyzed: false,
+            } as RiskAssessment);
+          }),
+        );
+      } finally {
+        if (!cancelled) setLoadingData(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const sMap = useMemo(() => new Map(settlements.map((s) => [s.transactionId, s])), [settlements]);
   const rMap = useMemo(() => new Map(risks.map((r) => [r.transactionId, r])), [risks]);
 

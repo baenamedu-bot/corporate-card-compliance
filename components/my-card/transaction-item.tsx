@@ -30,7 +30,7 @@ import {
   tierLabel,
   validateSettlement,
 } from "@/lib/risk-rules";
-import { upsertRisk, upsertSettlement } from "@/lib/storage";
+import { upsertFlag, upsertSettlement } from "@/lib/db/transactions";
 import { cn } from "@/lib/utils";
 
 export function TransactionItem({
@@ -57,7 +57,7 @@ export function TransactionItem({
   );
   const [saving, setSaving] = useState(false);
 
-  const save = () => {
+  const save = async () => {
     const v = validateSettlement(
       txn.amount,
       attendees,
@@ -71,20 +71,30 @@ export function TransactionItem({
     }
     setSaving(true);
     try {
-      upsertSettlement({
-        transactionId: txn.id,
+      await upsertSettlement({
+        transaction_id: txn.id,
         attendees: attendees.trim(),
         purpose: purpose.trim(),
-        hasPreApproval: tier >= 1 ? hasPreApproval : undefined,
-        approvalDocNumber: tier >= 2 ? approvalDocNumber.trim() : undefined,
-        submittedAt: new Date().toISOString(),
-        submittedByLast4: txn.cardLast4,
+        has_pre_approval: tier >= 1 ? hasPreApproval : null,
+        approval_doc_number: tier >= 2 ? approvalDocNumber.trim() : null,
       });
-      // 위험 평가 갱신
-      upsertRisk(risk);
+      // 위험 평가 동기화
+      await upsertFlag({
+        transaction_id: txn.id,
+        severity: risk.level,
+        rule_type: risk.classification?.verdict ?? "clear",
+        category: risk.classification?.category ?? null,
+        matched_code: risk.classification?.matchedCode ?? null,
+        matched_keyword: risk.classification?.matchedKeyword ?? null,
+        reasons: risk.reasons,
+        ai_analyzed: false,
+        needs_ai: !!risk.needsAI,
+      });
       toast.success("정산이 저장되었습니다.");
       onSaved();
       setOpen(false);
+    } catch (e) {
+      toast.error("저장 실패: " + (e instanceof Error ? e.message : String(e)));
     } finally {
       setSaving(false);
     }

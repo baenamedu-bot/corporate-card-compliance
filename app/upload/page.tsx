@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Upload as UploadIcon,
   FileSpreadsheet,
@@ -10,7 +10,6 @@ import {
   Loader2,
   X,
   Database,
-  Trash2,
   Zap,
   RotateCw,
 } from "lucide-react";
@@ -42,23 +41,10 @@ import {
   normalizeDetectedCompany,
   type DetectionResult,
 } from "@/lib/card-presets";
-import {
-  addBatch,
-  addTransactions,
-  getBatches,
-  getRisks,
-  getSettlements,
-  getTransactions,
-  resetAllData,
-  saveRisks,
-} from "@/lib/storage";
 import { ruleBasedRisk } from "@/lib/risk-rules";
-import type {
-  CardCompany,
-  ColumnMapping,
-  Transaction,
-  UploadBatch,
-} from "@/lib/types";
+import type { CardCompany, ColumnMapping, Transaction } from "@/lib/types";
+import { uploadTransactions, listTransactions, upsertFlagsBulk } from "@/lib/db/transactions";
+import { dbTxnToClient } from "@/lib/db/adapters";
 import { formatDateTime } from "@/lib/format";
 
 const CARD_COMPANIES: CardCompany[] = [
@@ -89,8 +75,38 @@ export default function UploadPage() {
   const [saving, setSaving] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const batches = useMemo(() => getBatches(), [refreshKey]);
-  const totalTxns = useMemo(() => getTransactions().length, [refreshKey]);
+  const [totalTxns, setTotalTxns] = useState(0);
+  const [recentBatches, setRecentBatches] = useState<
+    Array<{ source_file: string; uploaded_at: string; count: number; issuers: string[] }>
+  >([]);
+
+  // 통계 + 최근 업로드 묶음 로드
+  useEffect(() => {
+    (async () => {
+      try {
+        const all = await listTransactions({ limit: 1000 });
+        setTotalTxns(all.length);
+        // source_file 기준 묶음
+        const map = new Map<string, { source_file: string; uploaded_at: string; count: number; issuers: Set<string> }>();
+        all.forEach((t) => {
+          const key = t.source_file || "(이름 없음)";
+          const cur = map.get(key) || { source_file: key, uploaded_at: t.created_at, count: 0, issuers: new Set<string>() };
+          cur.count += 1;
+          cur.issuers.add(t.card_issuer);
+          if (new Date(t.created_at) > new Date(cur.uploaded_at)) cur.uploaded_at = t.created_at;
+          map.set(key, cur);
+        });
+        setRecentBatches(
+          Array.from(map.values())
+            .sort((a, b) => new Date(b.uploaded_at).getTime() - new Date(a.uploaded_at).getTime())
+            .slice(0, 8)
+            .map((b) => ({ source_file: b.source_file, uploaded_at: b.uploaded_at, count: b.count, issuers: Array.from(b.issuers) })),
+        );
+      } catch (e) {
+        // RLS 등으로 빈 결과 — 무시
+      }
+    })();
+  }, [refreshKey]);
 
   const onFile = useCallback(async (f: File) => {
     setFile(f);
@@ -209,42 +225,63 @@ export default function UploadPage() {
     if (!sheet || !mapping || !requiredOk) return;
     setSaving(true);
     try {
-      const batchId = `b-${Date.now()}`;
+      const sourceFile = file?.name || "업로드.xlsx";
       const txns: Transaction[] = applyMapping(
         sheet.rows,
         mapping,
         cardCompany,
-        batchId,
+        `b-${Date.now()}`, // 임시 id, Supabase에서 다시 발급
       );
       if (!txns.length) {
         toast.error("유효한 결제 내역이 없습니다.");
         return;
       }
 
-      const dates = txns.map((t) => new Date(t.paidAt).getTime()).filter((n) => !isNaN(n));
-      const batch: UploadBatch = {
-        id: batchId,
-        uploadedAt: new Date().toISOString(),
-        fileName: file?.name || "업로드.xlsx",
-        cardCompany,
-        rowCount: txns.length,
-        periodStart: dates.length
-          ? new Date(Math.min(...dates)).toISOString()
-          : undefined,
-        periodEnd: dates.length
-          ? new Date(Math.max(...dates)).toISOString()
-          : undefined,
-      };
+      // 1) Supabase RPC 로 일괄 insert + last4 → card_id 매칭 + audit
+      const result = await uploadTransactions(
+        txns.map((t) => ({
+          paid_at: t.paidAt,
+          merchant: t.merchantName,
+          merchant_category: t.merchantCategory ?? null,
+          mcc_code: t.merchantCode ?? null,
+          amount: t.amount,
+          card_last4: t.cardLast4,
+          card_issuer: t.cardCompany,
+          raw_data: null,
+          source_file: sourceFile,
+        })),
+      );
 
-      addTransactions(txns);
-      addBatch(batch);
+      // 2) 방금 업로드한 결제를 다시 조회해서 정확한 id 로 플래그 생성
+      //    source_file + 최근 created_at 기준으로 식별
+      const after = await listTransactions({ limit: 500 });
+      const mine = after.filter((r) => r.source_file === sourceFile).slice(0, txns.length);
+      const flags = mine.map((r) => {
+        const clientTxn = dbTxnToClient(r);
+        const risk = ruleBasedRisk(clientTxn);
+        return {
+          transaction_id: r.id,
+          severity: risk.level,
+          rule_type: risk.classification?.verdict ?? "clear",
+          category: risk.classification?.category ?? null,
+          matched_code: risk.classification?.matchedCode ?? null,
+          matched_keyword: risk.classification?.matchedKeyword ?? null,
+          reasons: risk.reasons,
+          ai_analyzed: false,
+          needs_ai: !!risk.needsAI,
+        };
+      });
+      await upsertFlagsBulk(flags);
 
-      // 룰 베이스 위험 분석 즉시 저장
-      const risks = getRisks().filter((r) => !txns.find((t) => t.id === r.transactionId));
-      txns.forEach((t) => risks.push(ruleBasedRisk(t)));
-      saveRisks(risks);
-
-      toast.success(`${txns.length}건이 저장되었습니다.`);
+      toast.success(
+        `${result.inserted}건 저장 · 카드 매칭 ${result.matched} / 미매칭 ${result.unmatched}`,
+      );
+      if (result.unmatched > 0) {
+        toast.message(
+          "미매칭 결제는 카드 관리에서 해당 카드를 등록·할당하면 자동 연결됩니다.",
+          { duration: 6000 },
+        );
+      }
       setFile(null);
       setSheet(null);
       setMapping(null);
@@ -262,25 +299,7 @@ export default function UploadPage() {
     <Container size="lg">
       <PageHeader
         title="카드사 청구 엑셀 업로드"
-        description="신한·삼성·국민·현대 등 카드사 양식 그대로 업로드하세요. AI가 컬럼을 자동 매핑해 표준 스키마로 통일합니다."
-        actions={
-          totalTxns > 0 ? (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                if (confirm("저장된 전체 결제·정산·위험 데이터를 삭제할까요?")) {
-                  resetAllData();
-                  setRefreshKey((k) => k + 1);
-                  toast.success("전체 데이터가 초기화되었습니다.");
-                }
-              }}
-            >
-              <Trash2 className="h-4 w-4" />
-              데이터 초기화
-            </Button>
-          ) : undefined
-        }
+        description="신한·삼성·국민·현대 등 카드사 양식 그대로 업로드하세요. AI가 컬럼을 자동 매핑해 Supabase 에 저장하고, 카드 끝 4자리로 직원에게 자동 연결합니다."
       />
 
       <div className="grid gap-6 lg:grid-cols-3">
@@ -551,27 +570,31 @@ export default function UploadPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-sm">업로드 이력</CardTitle>
-              <CardDescription>최근 업로드 배치</CardDescription>
+              <CardTitle className="text-sm">최근 업로드</CardTitle>
+              <CardDescription>source_file 기준 묶음 (최근 8건)</CardDescription>
             </CardHeader>
             <CardContent className="space-y-2">
-              {batches.length === 0 && (
-                <p className="text-xs text-muted-foreground">업로드된 배치가 없습니다.</p>
+              {recentBatches.length === 0 && (
+                <p className="text-xs text-muted-foreground">업로드된 결제가 없습니다.</p>
               )}
-              {batches.slice(0, 8).map((b) => (
+              {recentBatches.map((b) => (
                 <div
-                  key={b.id}
+                  key={b.source_file + b.uploaded_at}
                   className="rounded-lg border border-border/60 p-3 text-xs"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <Badge variant="outline">{b.cardCompany}</Badge>
+                    <div className="flex flex-wrap gap-1">
+                      {b.issuers.map((i) => (
+                        <Badge key={i} variant="outline">{i}</Badge>
+                      ))}
+                    </div>
                     <span className="tabular-nums text-muted-foreground">
-                      {b.rowCount.toLocaleString()}건
+                      {b.count.toLocaleString()}건
                     </span>
                   </div>
-                  <p className="mt-1.5 truncate font-medium">{b.fileName}</p>
+                  <p className="mt-1.5 truncate font-medium">{b.source_file}</p>
                   <p className="mt-0.5 text-muted-foreground">
-                    {formatDateTime(b.uploadedAt)}
+                    {formatDateTime(b.uploaded_at)}
                   </p>
                 </div>
               ))}
