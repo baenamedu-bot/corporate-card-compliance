@@ -1,5 +1,6 @@
 import type { AmountTier, RiskLevel, Transaction, RiskAssessment, Settlement } from "./types";
 import { isLateNight, isWeekend } from "./format";
+import { classifyMerchant } from "./compliance/restricted-categories";
 
 export function amountTier(amount: number): AmountTier {
   if (amount >= 2_000_000) return 3;
@@ -54,24 +55,29 @@ export function validateSettlement(
   return { ok: true };
 }
 
-/* ---------- 휴리스틱 위험 탐지 ---------- */
+/* ---------- 룰 베이스 위험 탐지 ---------- */
 
-const SUSPICIOUS_KEYWORDS = [
-  "노래", "단란", "유흥", "주점", "바", "BAR", "Bar", "룸", "ROOM",
-  "클럽", "CLUB", "라운지", "LOUNGE", "마사지", "안마", "스파",
-  "텐프로", "가라오케", "캬바", "호스트", "퍼블릭", "단란주점",
-];
-
-/** 룰 베이스 위험 분석 (AI 호출 없이 즉시) */
+/**
+ * 룰 베이스 위험 분석 (AI 호출 없이 즉시).
+ *  - 컴플라이언스 분류는 lib/compliance/restricted-categories 의 classifyMerchant() 사용
+ *  - verdict 별 위험도 가산:
+ *      restricted → critical 확정
+ *      suspicious → 한 단계 격상
+ *      ambiguous  → needsAI=true 로 표시, level 은 일단 medium 이상으로 보수적
+ *      clear      → 가산 없음
+ *  - 금액 구간/심야/주말 룰은 그대로 가산
+ */
 export function ruleBasedRisk(txn: Transaction): RiskAssessment {
   const reasons: string[] = [];
   const tier = amountTier(txn.amount);
 
-  const name = (txn.merchantName || "").toUpperCase();
-  const hasSuspicious = SUSPICIOUS_KEYWORDS.some((k) =>
-    name.includes(k.toUpperCase()),
-  );
-  if (hasSuspicious) reasons.push("가맹점명에 유흥업종 의심 키워드 포함");
+  const classification = classifyMerchant({
+    merchantName: txn.merchantName,
+    merchantCode: txn.merchantCode,
+  });
+
+  // 분류 사유를 리스크 사유로 합침
+  reasons.push(...classification.reasons);
 
   if (isLateNight(txn.paidAt)) reasons.push("심야(22시~05시) 시간대 결제");
   if (isWeekend(txn.paidAt)) reasons.push("주말 결제");
@@ -80,11 +86,31 @@ export function ruleBasedRisk(txn: Transaction): RiskAssessment {
   else if (tier === 2) reasons.push("100만원 이상 사전 승인 필요");
   else if (tier === 1) reasons.push("50만원 이상 사후 보고 대상");
 
+  // 베이스 레벨 산정
   let level: RiskLevel = "low";
-  if (hasSuspicious || tier === 3) level = "critical";
-  else if (tier === 2 || (isLateNight(txn.paidAt) && tier >= 1)) level = "high";
+  if (tier === 3) level = "critical";
+  else if (tier === 2) level = "high";
   else if (tier === 1 || isLateNight(txn.paidAt) || isWeekend(txn.paidAt))
     level = "medium";
+
+  // 컴플라이언스 분류 가산
+  switch (classification.verdict) {
+    case "restricted":
+      level = "critical"; // 룸살롱·단란주점 등 명확 → 무조건 critical
+      break;
+    case "suspicious":
+      level = severity(level) >= severity("high") ? level : "high";
+      break;
+    case "ambiguous":
+      // 위험도는 보수적으로, AI 분류가 결정
+      level = severity(level) >= severity("medium") ? level : "medium";
+      break;
+  }
+
+  // 심야 + 1단계 이상 결제는 위험도 한 단계 추가 격상
+  if (isLateNight(txn.paidAt) && tier >= 1 && level !== "critical") {
+    level = severity(level) >= severity("high") ? level : "high";
+  }
 
   return {
     transactionId: txn.id,
@@ -93,7 +119,18 @@ export function ruleBasedRisk(txn: Transaction): RiskAssessment {
     amountTier: tier,
     assessedAt: new Date().toISOString(),
     aiAnalyzed: false,
+    classification: {
+      verdict: classification.verdict,
+      category: classification.category,
+      matchedCode: classification.matchedCode,
+      matchedKeyword: classification.matchedKeyword,
+    },
+    needsAI: classification.needsAI,
   };
+}
+
+function severity(l: RiskLevel): number {
+  return { low: 0, medium: 1, high: 2, critical: 3 }[l];
 }
 
 export function riskLevelLabel(l: RiskLevel): string {

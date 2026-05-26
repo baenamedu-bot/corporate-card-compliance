@@ -37,6 +37,15 @@ export interface RiskAssessment {
   amountTier: AmountTier;
   assessedAt: string;
   aiAnalyzed: boolean;
+  /** 컴플라이언스 룰 베이스 분류 결과 (룸살롱·단란주점 등) */
+  classification?: {
+    verdict: "restricted" | "suspicious" | "ambiguous" | "clear";
+    category?: string;
+    matchedCode?: string;
+    matchedKeyword?: string;
+  };
+  /** 룰 베이스로 결론을 내지 못해 AI 추가 분류가 필요한지 */
+  needsAI?: boolean;
 }
 
 export interface UploadBatch {

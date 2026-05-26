@@ -101,6 +101,16 @@ export default function AdminPage() {
     return { total, pending, critical, high, count: txns.length };
   }, [txns, risks, settledMap]);
 
+  /* ---------- 컴플라이언스 분류 통계 ---------- */
+  const classStats = useMemo(() => {
+    const c = { restricted: 0, suspicious: 0, ambiguous: 0, clear: 0 };
+    risks.forEach((r) => {
+      const v = r.classification?.verdict;
+      if (v && v in c) c[v as keyof typeof c]++;
+    });
+    return c;
+  }, [risks]);
+
   /* ---------- 부서/개인 별 합계 ---------- */
   const byDept = useMemo(() => {
     const m = new Map<string, number>();
@@ -182,33 +192,45 @@ export default function AdminPage() {
     return list.slice(0, 30);
   }, [txns, riskMap, activeTier, query]);
 
-  /* ---------- AI 위험 분석 ---------- */
+  /* ---------- AI 보강 분석 (모호 케이스만) ---------- */
+  /**
+   * 룰 베이스 분류가 명확히 끝낸 결제(restricted/clear)는 AI 호출 X.
+   * needsAI=true 인 결제(주로 BAR/CLUB/마사지 등 모호 키워드)만 Gemini 로 보강.
+   */
+  const aiTargets = useMemo(
+    () =>
+      txns.filter((t) => {
+        const r = riskMap.get(t.id);
+        if (!r) return true;
+        if (r.aiAnalyzed) return false;
+        return r.needsAI === true;
+      }),
+    [txns, riskMap],
+  );
+
   const runAi = async () => {
     if (!txns.length) {
       toast.message("분석할 결제 내역이 없습니다.");
       return;
     }
+    if (!aiTargets.length) {
+      toast.message(
+        "추가 AI 분석이 필요한 결제가 없습니다. 룰 베이스로 모두 명확히 분류되었습니다.",
+      );
+      return;
+    }
     setAnalyzing(true);
     try {
-      const targets = txns.filter((t) => {
-        const r = riskMap.get(t.id);
-        return !r || !r.aiAnalyzed;
-      });
-      if (!targets.length) {
-        toast.message("이미 모든 결제가 AI로 분석되었습니다.");
-        return;
-      }
-      // 25건 단위 배치
       const next: RiskAssessment[] = [...risks];
       const chunk = 25;
-      for (let i = 0; i < targets.length; i += chunk) {
-        const slice = targets.slice(i, i + chunk);
+      for (let i = 0; i < aiTargets.length; i += chunk) {
+        const slice = aiTargets.slice(i, i + chunk);
         const ai = await analyzeRiskBatch(slice);
         slice.forEach((t) => {
           const aiItem = ai.find((a) => a.id === t.id);
           const baseRule = ruleBasedRisk(t);
           const reasons = aiItem
-            ? Array.from(new Set([...baseRule.reasons, ...aiItem.reasons]))
+            ? Array.from(new Set([...baseRule.reasons, ...aiItem.reasons.map((r) => `AI: ${r}`)]))
             : baseRule.reasons;
           const level =
             aiItem && severity(aiItem.level) > severity(baseRule.level)
@@ -216,12 +238,12 @@ export default function AdminPage() {
               : baseRule.level;
           const idx = next.findIndex((r) => r.transactionId === t.id);
           const merged: RiskAssessment = {
-            transactionId: t.id,
+            ...baseRule,
             level,
             reasons,
-            amountTier: amountTier(t.amount),
             assessedAt: new Date().toISOString(),
             aiAnalyzed: true,
+            needsAI: false,
           };
           if (idx >= 0) next[idx] = merged;
           else next.push(merged);
@@ -229,7 +251,7 @@ export default function AdminPage() {
         saveRisks(next);
         setRefreshKey((k) => k + 1);
       }
-      toast.success(`${targets.length}건의 AI 위험 분석이 완료되었습니다.`);
+      toast.success(`모호 케이스 ${aiTargets.length}건의 AI 보강 분석이 완료되었습니다.`);
     } catch (e) {
       if (e instanceof MissingApiKeyError) {
         toast.message("Gemini API 키가 필요합니다. 우측 상단 ⚙️ 버튼에서 설정해주세요.");
@@ -247,12 +269,35 @@ export default function AdminPage() {
         title="컴플라이언스 대시보드"
         description="전사 결제 모니터링, 위험 결제 자동 탐지, 미정산 현황을 한 곳에서 관리하세요."
         actions={
-          <Button onClick={runAi} disabled={analyzing} variant="accent">
+          <Button
+            onClick={runAi}
+            disabled={analyzing || aiTargets.length === 0}
+            variant={aiTargets.length === 0 ? "outline" : "accent"}
+          >
             {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-            {analyzing ? "AI 분석 중..." : "AI 위험 분석 실행"}
+            {analyzing
+              ? "AI 분석 중..."
+              : aiTargets.length === 0
+                ? "AI 보강 불필요"
+                : `모호 ${aiTargets.length}건 AI 보강 분석`}
           </Button>
         }
       />
+
+      {/* 컴플라이언스 분류 요약 띠 */}
+      {risks.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-4 py-2.5 text-xs">
+          <span className="font-medium text-muted-foreground">컴플라이언스 분류</span>
+          <span className="text-muted-foreground/40">·</span>
+          <ClassChip label="확정 제한" value={classStats.restricted} tone="red" />
+          <ClassChip label="검토 필요" value={classStats.suspicious} tone="amber" />
+          <ClassChip label="AI 분류 필요" value={classStats.ambiguous} tone="muted" />
+          <ClassChip label="정상" value={classStats.clear} tone="emerald" />
+          <span className="ml-auto text-[11px] text-muted-foreground">
+            룰 베이스 사전(KSIC 코드 · 가맹점명 정규식)으로 즉시 판정 — AI 호출은 모호 케이스 한정
+          </span>
+        </div>
+      )}
 
       {/* KPI */}
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
@@ -567,15 +612,36 @@ function Kpi({
 }
 
 function RiskRow({ txn, risk, settled }: { txn: Transaction; risk: RiskAssessment; settled: boolean }) {
+  const cls = risk.classification;
   return (
     <div className={"rounded-lg border border-border/60 px-4 py-3 " + riskBarClass(risk.level)}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <p className="truncate font-medium">{txn.merchantName}</p>
             <span className={"inline-flex items-center rounded-md border px-1.5 py-0 text-[10px] font-medium " + riskLevelClass(risk.level)}>
               {riskLevelLabel(risk.level)}
             </span>
+            {cls?.verdict === "restricted" && cls.category && (
+              <Badge variant="red" className="text-[10px]">
+                {cls.category}
+              </Badge>
+            )}
+            {cls?.verdict === "suspicious" && cls.category && (
+              <Badge variant="amber" className="text-[10px]">
+                {cls.category}
+              </Badge>
+            )}
+            {cls?.verdict === "ambiguous" && (
+              <Badge variant="muted" className="text-[10px]">
+                {cls.category ?? "모호"} · AI 분류 필요
+              </Badge>
+            )}
+            {cls?.matchedCode && (
+              <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                KSIC {cls.matchedCode}
+              </span>
+            )}
             {risk.aiAnalyzed && (
               <Badge variant="accent" className="text-[10px]">
                 <Sparkles className="h-2.5 w-2.5" />AI
@@ -630,5 +696,28 @@ function EmptyChart() {
     <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
       데이터가 없습니다
     </div>
+  );
+}
+
+function ClassChip({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "red" | "amber" | "muted" | "emerald";
+}) {
+  const cls = {
+    red: "border-red-200 bg-red-50 text-red-700",
+    amber: "border-amber-200 bg-amber-50 text-amber-700",
+    muted: "border-border bg-background text-foreground",
+    emerald: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  }[tone];
+  return (
+    <span className={"inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium " + cls}>
+      <span className="opacity-80">{label}</span>
+      <span className="tabular-nums font-semibold">{value}</span>
+    </span>
   );
 }

@@ -80,6 +80,19 @@ lib/
 1. **컬럼 매핑**: 카드사 헤더 + 샘플 3행 → 표준 컬럼명으로 매핑한 JSON 반환
 2. **위험 분류**: 가맹점명·업종·시간 → `{ level, reasons[] }` JSON 반환 (유흥/심야/주말 등)
 
+## 컴플라이언스 분류 사전 (토큰 절감)
+`lib/compliance/restricted-categories.ts` — 룸살롱·단란주점·유흥주점·노래주점 등을 결정적으로 판정.
+
+- **KSIC 코드 사전** `RESTRICTED_KSIC`: 56211(일반유흥) / 56212(무도유흥) → restricted, 56213(생맥주) / 56219(기타주점) / 96121(안마) / 91221(노래연습장) → suspicious. `CLEAR_KSIC` 셋(56111~56229 음식·음료) → clear
+- **명확 키워드** `STRONG_KEYWORDS`: 룸살롱·텐프로·호스트바·퍼블릭·단란주점·가라오케·캬바·나이트클럽·성인오락 등 (정규식, 즉시 restricted 확정)
+- **모호 키워드** `AMBIGUOUS_KEYWORDS`: `BAR`·`CLUB`·`라운지`·`마사지`·`살롱` (와인바·골프클럽·치료마사지와 구분 불가 → AI 보강)
+- **안전 힌트** `SAFE_HINTS`: 와인바·골프·헬스·병원·호텔라운지·웨딩 등 (모호 키워드 오탐 방지)
+
+`classifyMerchant()` → `{ verdict: restricted | suspicious | ambiguous | clear, category?, matchedCode?, matchedKeyword?, needsAI, reasons[] }`
+
+**ruleBasedRisk()** 가 이 함수를 호출해 `classification` + `needsAI` 를 `RiskAssessment` 에 저장.
+**admin 페이지** AI 분석 버튼은 `needsAI=true` 인 결제만 Gemini 로 보냄 (룰 베이스로 명확한 건은 토큰 0).
+
 ## 카드사 프리셋 (토큰 절감)
 `lib/card-presets.ts` — 신한·삼성·국민·현대·롯데·BC·하나·우리 8개 카드사 컬럼 매핑 프리셋.
 - `detectCardCompany({fileName, sheetName, headers})`: 파일명 → 시트명 → 헤더 키워드 순으로 카드사 추정 (점수제)

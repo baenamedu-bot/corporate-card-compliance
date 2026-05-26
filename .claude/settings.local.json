@@ -4,7 +4,8 @@
       "Bash(dir)",
       "Bash(Get-ChildItem -Force)",
       "Bash(git --version)",
-      "Bash(git init *)"
+      "Bash(git init *)",
+      "Bash(git push *)"
     ]
   }
 }
