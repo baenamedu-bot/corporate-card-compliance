@@ -1,7 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { Download, Calendar, ShieldAlert, Users, AlertCircle } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { Download, Calendar, ShieldAlert, Users, AlertCircle, FileText, Loader2 } from "lucide-react";
 import { Container, PageHeader } from "@/components/layout/container";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ import {
 } from "@/lib/storage";
 import { formatKRW, formatDate, maskCard, monthRange, weekRange } from "@/lib/format";
 import { exportTransactionsXlsx } from "@/lib/excel-utils";
+import { buildReportFileName, exportElementToPDF } from "@/lib/pdf-export";
 import { isSettled, riskLevelLabel, riskLevelClass } from "@/lib/risk-rules";
 import {
   BarChart,
@@ -35,6 +36,8 @@ type Period = "week" | "month";
 
 export default function ReportsPage() {
   const [period, setPeriod] = useState<Period>("week");
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const captureRef = useRef<HTMLDivElement>(null);
 
   const range = useMemo(() => (period === "week" ? weekRange() : monthRange()), [period]);
 
@@ -128,6 +131,32 @@ export default function ReportsPage() {
     toast.success(`${inPeriod.length}건이 포함된 보고서가 다운로드되었습니다.`);
   };
 
+  const onExportPdf = async () => {
+    if (!captureRef.current) return;
+    if (inPeriod.length === 0) {
+      toast.message("PDF로 출력할 데이터가 없습니다.");
+      return;
+    }
+    setExportingPdf(true);
+    const t = toast.loading("PDF 생성 중... (한글 폰트 로딩 후 캡쳐)");
+    try {
+      const fileName = buildReportFileName(period, range.start);
+      await exportElementToPDF({
+        fileName,
+        element: captureRef.current,
+        title: fileName.replace(/\.pdf$/, ""),
+      });
+      toast.success(`${fileName} 다운로드 완료`, { id: t });
+    } catch (e) {
+      toast.error(
+        "PDF 생성 실패: " + (e instanceof Error ? e.message : "알 수 없는 오류"),
+        { id: t },
+      );
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   const rangeLabel =
     period === "week"
       ? `${formatDate(range.start.toISOString())} ~ ${formatDate(
@@ -139,12 +168,26 @@ export default function ReportsPage() {
     <Container size="lg">
       <PageHeader
         title="주간 · 월간 사용보고서"
-        description="기간별 지출 합계, 부서·개인별 순위, 컴플라이언스 리스크, 미입력자 명단을 한 화면에서 보고 엑셀로 내보냅니다."
+        description="기간별 지출 합계, 부서·개인별 순위, 컴플라이언스 리스크, 미입력자 명단을 한 화면에서 보고 엑셀·PDF 로 내보냅니다."
         actions={
-          <Button onClick={onExport} variant="accent">
-            <Download className="h-4 w-4" />
-            엑셀로 내보내기
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              onClick={onExportPdf}
+              disabled={exportingPdf}
+              variant="outline"
+            >
+              {exportingPdf ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <FileText className="h-4 w-4" />
+              )}
+              {exportingPdf ? "PDF 생성 중..." : "PDF 출력"}
+            </Button>
+            <Button onClick={onExport} variant="accent">
+              <Download className="h-4 w-4" />
+              엑셀로 내보내기
+            </Button>
+          </div>
         }
       />
 
@@ -160,6 +203,28 @@ export default function ReportsPage() {
           <span className="font-medium tabular-nums">{rangeLabel}</span>
         </div>
       </div>
+
+      <div ref={captureRef} data-pdf-capture="true" className="space-y-6">
+        {/* PDF 표지 영역 — 화면/PDF 모두 표시 */}
+        <div className="rounded-xl border border-border/70 bg-white px-6 py-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-widest text-muted-foreground">
+                Corporate Card Compliance Report
+              </p>
+              <h2 className="mt-1 text-xl font-semibold tracking-tight">
+                법인카드 {period === "week" ? "주간" : "월간"} 사용보고서
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground tabular-nums">
+                기간 {rangeLabel}
+              </p>
+            </div>
+            <div className="text-right text-[11px] text-muted-foreground">
+              <p>생성일시</p>
+              <p className="mt-0.5 tabular-nums">{formatDate(new Date().toISOString())}</p>
+            </div>
+          </div>
+        </div>
 
       <div className="mb-6 grid gap-3 sm:grid-cols-4">
         <Kpi label="기간 합계" value={formatKRW(stats.total)} />
@@ -334,6 +399,7 @@ export default function ReportsPage() {
           </Card>
         </div>
       )}
+      </div>
     </Container>
   );
 }

@@ -80,6 +80,14 @@ lib/
 1. **컬럼 매핑**: 카드사 헤더 + 샘플 3행 → 표준 컬럼명으로 매핑한 JSON 반환
 2. **위험 분류**: 가맹점명·업종·시간 → `{ level, reasons[] }` JSON 반환 (유흥/심야/주말 등)
 
+## PDF 출력 (보고서)
+`lib/pdf-export.ts` — html2canvas + jsPDF 로 보고서 화면을 A4 세로 PDF 로 저장.
+- 한글 처리: 캡쳐 시 텍스트가 픽셀로 래스터화 → 폰트 임베딩 자체 불필요. `document.fonts.ready` 대기 + `onclone` 에서 Pretendard 강제 적용으로 깨짐 방지
+- 캡쳐 영역은 `data-pdf-capture="true"` 속성으로 표시. 모바일에서도 desktop 레이아웃(1080px) 강제
+- 다중 페이지 분할: A4 본문 영역 단위로 음수 y offset 으로 그리는 방식
+- 파일명: `buildReportFileName(period, periodStart)` → `법인카드_사용보고서_YYYY-MM-DD주차.pdf` 또는 `법인카드_사용보고서_YYYY-MM월.pdf`
+- 동적 import 로 reports 페이지 초기 번들 절감 (PDF 버튼 클릭 시점에만 로드)
+
 ## 컴플라이언스 분류 사전 (토큰 절감)
 `lib/compliance/restricted-categories.ts` — 룸살롱·단란주점·유흥주점·노래주점 등을 결정적으로 판정.
 
