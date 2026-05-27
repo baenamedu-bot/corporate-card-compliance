@@ -1,4 +1,4 @@
-import { getGemini, parseJsonResponse } from "./gemini-client";
+import { generateJson, parseJsonResponse } from "./gemini-client";
 import type { ColumnMapping } from "./types";
 
 const SYSTEM_INSTRUCTION = `당신은 한국 카드사(신한, 삼성, 국민, 현대, 롯데, BC, NH농협, 하나) 청구 엑셀의 컬럼을 표준 스키마로 매핑하는 전문가입니다.
@@ -11,8 +11,6 @@ interface PromptInput {
 }
 
 export async function mapColumnsWithAI(input: PromptInput): Promise<ColumnMapping> {
-  const model = getGemini();
-
   const prompt = `다음은 한국 카드사 청구 엑셀의 컬럼 헤더와 샘플 데이터입니다.
 
 [헤더 목록]
@@ -49,12 +47,11 @@ JSON 스키마:
 
 반드시 헤더 목록에 실제 존재하는 컬럼명만 사용하세요. 적절한 컬럼이 없으면 null.`;
 
-  const result = await model.generateContent({
+  const text = await generateJson({
     contents: [
       { role: "user", parts: [{ text: SYSTEM_INSTRUCTION + "\n\n" + prompt }] },
     ],
   });
-  const text = result.response.text();
   const parsed = parseJsonResponse<ColumnMapping & { [k: string]: unknown }>(text);
 
   // null/undefined optional 필드 정리

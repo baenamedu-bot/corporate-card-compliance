@@ -43,7 +43,7 @@ import {
 import type { RiskAssessment, RiskLevel, Settlement, Transaction } from "@/lib/types";
 import { daysSince, formatKRW, formatDateTime, maskCard, SETTLEMENT_URGENT_DAYS } from "@/lib/format";
 import { analyzeRiskBatch } from "@/lib/ai-risk";
-import { MissingApiKeyError } from "@/lib/gemini-client";
+import { showAiError } from "@/components/ai/ai-error-toast";
 import {
   Bar,
   BarChart,
@@ -361,11 +361,7 @@ export default function AdminPage() {
       }
       toast.success(`모호 케이스 ${aiTargets.length}건의 AI 보강 분석이 완료되었습니다.`);
     } catch (e) {
-      if (e instanceof MissingApiKeyError) {
-        toast.message("Gemini API 키가 필요합니다. 우측 상단 ⚙️ 버튼에서 설정해주세요.");
-      } else {
-        toast.error("AI 분석 실패: " + (e instanceof Error ? e.message : "알 수 없음"));
-      }
+      showAiError(e, "AI 분석 실패");
     } finally {
       setAnalyzing(false);
     }

@@ -34,7 +34,7 @@ import {
   type ParsedSheet,
 } from "@/lib/excel-utils";
 import { mapColumnsWithAI } from "@/lib/ai-mapping";
-import { MissingApiKeyError } from "@/lib/gemini-client";
+import { showAiError } from "@/components/ai/ai-error-toast";
 import {
   applyPreset,
   detectCardCompany,
@@ -172,11 +172,7 @@ export default function UploadPage() {
       setMappingSource("ai");
       toast.success(`AI 매핑 완료 (신뢰도 ${Math.round(m.confidence * 100)}%)`);
     } catch (e) {
-      if (e instanceof MissingApiKeyError) {
-        toast.message("Gemini API 키가 필요합니다. 우측 상단 ⚙️ 버튼에서 설정해주세요.");
-      } else {
-        toast.error("AI 매핑 실패: " + (e instanceof Error ? e.message : "알 수 없는 오류"));
-      }
+      showAiError(e, "AI 매핑 실패");
     } finally {
       setAnalyzing(false);
     }
